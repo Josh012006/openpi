@@ -96,7 +96,8 @@ class DataConfig:
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
     # List of datasets to sample from: name, version, weight, and optionally filter_dict_path
     datasets: Sequence[droid_rlds_dataset.RLDSDataset] = ()
-
+    # If set, only the first N episodes of the dataset will be used (None = use all).
+    num_demos: int | None = None
 
 class GroupFactory(Protocol):
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
@@ -173,6 +174,11 @@ class DataConfigFactory(abc.ABC):
     # Base config that will be updated by the factory.
     base_config: tyro.conf.Suppress[DataConfig | None] = None
 
+    # If set, only the first N episodes of the dataset will be used (None = use all).
+    # Exposed on the CLI as --data.num-demos, same nesting pattern as --data.repo-id.
+    num_demos: int | None = None
+
+
     @abc.abstractmethod
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         """Create a data config."""
@@ -186,6 +192,7 @@ class DataConfigFactory(abc.ABC):
             asset_id=asset_id,
             norm_stats=self._load_norm_stats(epath.Path(self.assets.assets_dir or assets_dirs), asset_id),
             use_quantile_norm=model_config.model_type != ModelType.PI0,
+            num_demos=self.num_demos,
         )
 
     def _load_norm_stats(self, assets_dir: epath.Path, asset_id: str | None) -> dict[str, _transforms.NormStats] | None:
@@ -770,7 +777,7 @@ _CONFIGS = [
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_droid/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
     ),
@@ -834,7 +841,7 @@ _CONFIGS = [
                 ]
             ),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_droid/params"),
         num_train_steps=20_000,
         batch_size=64,
     ),
@@ -886,7 +893,44 @@ _CONFIGS = [
             use_cartesian_state=True,
             base_config=DataConfig(prompt_from_task=True),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_droid/params"),
+        num_train_steps=20_000,
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=0,
+            peak_lr=2.5e-5,
+            decay_steps=100_000,
+            decay_lr=2.5e-5,
+        ),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="expo_pi05_droid_lora_finetune_sft_joint_state",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotDROIDDataConfig(
+            repo_id="",
+            output_action_dim=8,
+            use_cartesian_state=False,
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_droid_jointpos/assets",
+                asset_id="droid",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_droid_jointpos/params"),
         num_train_steps=20_000,
         batch_size=64,
         lr_schedule=_optimizer.CosineDecaySchedule(
@@ -917,7 +961,7 @@ _CONFIGS = [
             use_cartesian_state=True,
             base_config=DataConfig(prompt_from_task=True),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_droid/params"),
         num_train_steps=20_000,
         batch_size=64,
         lr_schedule=_optimizer.CosineDecaySchedule(
@@ -926,6 +970,30 @@ _CONFIGS = [
             decay_steps=100_000,
             decay_lr=5e-5,
         ),
+    ),
+    TrainConfig(
+        name="expo_pi05_droid_full_finetune_sft_joint_state",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,
+        ),
+        data=LeRobotDROIDDataConfig(
+            repo_id="",
+            output_action_dim=8,
+            use_cartesian_state=False,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_droid/params"),
+        num_train_steps=20_000,
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=0,
+            peak_lr=2.5e-5,
+            decay_steps=100_000,
+            decay_lr=2.5e-5,
+        ),
+        ema_decay=None,
     ),
     # Same as expo_pi05_droid_lora_finetune_rl but state = cartesian_position (6D) + gripper.
     TrainConfig(
@@ -943,7 +1011,7 @@ _CONFIGS = [
             use_cartesian_state=True,
             base_config=DataConfig(prompt_from_task=True),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_droid/params"),
         num_train_steps=1_000_000,
         batch_size=64,
         lr_schedule=_optimizer.CosineDecaySchedule(

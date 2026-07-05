@@ -27,6 +27,8 @@ import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
 
+import os
+from torch.utils.tensorboard import SummaryWriter
 
 def init_logging():
     """Custom logging format for better readability."""
@@ -256,6 +258,7 @@ def main(config: _config.TrainConfig):
     )
 
     infos = []
+    tb_writer = SummaryWriter(log_dir=os.path.join(os.path.dirname(config.checkpoint_dir), "tensorboard"))
     for step in pbar:
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
@@ -266,6 +269,8 @@ def main(config: _config.TrainConfig):
             info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
+            for k, v in reduced_info.items():
+                tb_writer.add_scalar(f"sft/{k}", v, global_step=step)
             infos = []
         batch = next(data_iter)
 
@@ -273,6 +278,7 @@ def main(config: _config.TrainConfig):
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
 
     logging.info("Waiting for checkpoint manager to finish")
+    tb_writer.close()
     checkpoint_manager.wait_until_finished()
 
 
