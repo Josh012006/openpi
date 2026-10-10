@@ -444,6 +444,14 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
     use_cartesian_state: bool = False
     # Output image size (H, W) from model transforms. Override via train config so buffer and transform match (e.g. 84 for RLPD).
     model_image_resize: int = 224
+    # If True, the dataset's `actions` are ABSOLUTE joint targets (7) + gripper (1), and are converted at training
+    # time into OFFSETS from the joint state at the start of each action chunk (openpi's DeltaActions encoding, the
+    # one the pi05_droid_jointpos weights were trained with). The gripper stays absolute.
+    # TRAINING ONLY: there is deliberately no AbsoluteActions in the outputs, so at inference the policy still returns
+    # offsets, exactly like the base pi05_droid_jointpos weights, and the caller (eval_policy.py,
+    # chunk_action_reference: chunk_start_state) adds the chunk-start state back. Adding AbsoluteActions here too
+    # would add the state twice.
+    delta_joint_actions: bool = False
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -465,11 +473,21 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
             inputs=[_transforms.RepackTransform(repack_mapping)]
         )
         # DroidInputs builds state = concat(observation/cartesian_position or observation/joint_position, gripper).
-        # We assume joint *velocity* actions, so we should *not* apply an additional delta transform.
+        # We assume joint *velocity* actions, so we should *not* apply an additional delta transform,
+        # unless delta_joint_actions is set (absolute joint-position targets in the dataset).
         data_transforms = _transforms.Group(
             inputs=[droid_policy.DroidInputs(model_type=model_config.model_type)],
             outputs=[droid_policy.DroidOutputs(action_dim=self.output_action_dim)],
         )
+        if self.delta_joint_actions:
+            if self.use_cartesian_state:
+                raise ValueError("delta_joint_actions needs a joint state (use_cartesian_state=False).")
+            # Runs after DroidInputs (which builds `state` = 7 joints + gripper), before normalization.
+            # Mask: first 7 dims (joints) become offsets from state, 8th (gripper) stays absolute.
+            # inputs only -- see the comment on the delta_joint_actions field.
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(_transforms.make_bool_mask(7, -1))],
+            )
         model_transforms = ModelTransformFactory(
             image_resize=self.model_image_resize,
         )(model_config)
@@ -924,6 +942,48 @@ _CONFIGS = [
             repo_id="",
             output_action_dim=8,
             use_cartesian_state=False,
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_droid_jointpos/assets",
+                asset_id="droid",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_droid_jointpos/params"),
+        num_train_steps=20_000,
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=0,
+            peak_lr=2.5e-5,
+            decay_steps=100_000,
+            decay_lr=2.5e-5,
+        ),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    # Same as expo_pi05_droid_lora_finetune_sft_joint_state (same weights, same DROID norm stats), for datasets whose
+    # `actions` are ABSOLUTE joint-position targets + gripper (e.g. the FORGE waypoint demos): the 7 joints are turned
+    # into offsets from the chunk-start state at training time. Use it for SFT only; evaluation with the plain
+    # ..._joint_state config is equivalent (same model, same output encoding).
+    TrainConfig(
+        name="expo_pi05_droid_lora_finetune_sft_joint_state_delta",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotDROIDDataConfig(
+            repo_id="",
+            output_action_dim=8,
+            use_cartesian_state=False,
+            delta_joint_actions=True,
             assets=AssetsConfig(
                 assets_dir="gs://openpi-assets/checkpoints/pi05_droid_jointpos/assets",
                 asset_id="droid",
